@@ -9,7 +9,7 @@ from openai import OpenAI  # Import the OpenAI client
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = 7195510626:AAFDR77Ahcc-ePHa5Ug9QWf_FzvfltP1ZvE'  # Replace with your bot's API token
+TOKEN = '7195510626:AAFDR77Ahcc-ePHa5Ug9QWf_FzvfltP1ZvE'  # Replace with your bot's API token
 OWNER_ID = 6460703454  # Replace with the owner's Telegram user ID
 
 bot = telebot.TeleBot(TOKEN)
