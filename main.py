@@ -75,7 +75,7 @@ system_role = (
 # Initialize the OpenAI client
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key="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",  # Replace with your OpenRouter API key
+    api_key="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",  # Replace with your OpenRouter API key
 )
 
 def send_message(user_message, user_id):
