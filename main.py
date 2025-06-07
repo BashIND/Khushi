@@ -1,235 +1,247 @@
+# --- START OF FILE khushhh.py ---
+
 import time
 import telebot
-import requests
 import json
 import logging
-from collections import defaultdict
-from openai import OpenAI  # Import the OpenAI client
+import random
+import atexit
+import os
+import threading
+from openai import OpenAI
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# --- CONFIGURATION ---
+TOKEN = '7195510626:AAFDR77Ahcc-ePHa5Ug9QWf_FzvfltP1ZvE'
+OWNER_ID = 6460703454  # Your Telegram user ID
+OPENROUTER_API_KEY = "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" # Your OpenRouter API key
 
-TOKEN = '7195510626:AAFDR77Ahcc-ePHa5Ug9QWf_FzvfltP1ZvE'  # Replace with your bot's API token
-OWNER_ID = 6460703454  # Replace with the owner's Telegram user ID
-
-bot = telebot.TeleBot(TOKEN)
-
-# File names to store authorized data
+# --- FILE NAMES ---
 AUTHORIZED_USERS_FILE = 'authorized_users.json'
 AUTHORIZED_GROUPS_FILE = 'authorized_groups.json'
+CHAT_HISTORY_FILE = 'chat_history.json'
+
+# --- LOGGING SETUP ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# --- BOT & API INITIALIZATION ---
+bot = telebot.TeleBot(TOKEN)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
+
+# --- GLOBAL STATE & THREAD SAFETY ---
+chat_history = {}
+chat_history_lock = threading.Lock()
+authorized_users = set()
+authorized_groups = set()
+BOT_USERNAME = "" # Will be fetched at startup
+
+def load_from_json(filename):
+    try:
+        with open(filename, 'r') as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        logging.warning(f"{filename} not found or invalid. Starting with an empty set.")
+        return set()
+
+def save_to_json(filename, data):
+    try:
+        with open(filename, 'w') as f:
+            json.dump(list(data), f, indent=4)
+    except Exception as e:
+        logging.error(f"Failed to save data to {filename}: {e}")
+
+def load_chat_history():
+    global chat_history
+    try:
+        with open(CHAT_HISTORY_FILE, 'r') as f:
+            chat_history = json.load(f)
+            logging.info("Chat history loaded successfully.")
+    except (FileNotFoundError, json.JSONDecodeError):
+        chat_history = {}
+        logging.warning("Chat history file not found or invalid. Starting fresh.")
+
+def save_chat_history():
+    with chat_history_lock:
+        save_to_json(CHAT_HISTORY_FILE, chat_history)
+        logging.info("Chat history successfully saved.")
 
 def load_authorized_data():
     global authorized_users, authorized_groups
-    try:
-        with open(AUTHORIZED_USERS_FILE, 'r') as f:
-            authorized_users = set(int(uid) for uid in json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
-        logging.warning(f"Failed to load authorized users: {e}")
-        authorized_users = set()
-
-    try:
-        with open(AUTHORIZED_GROUPS_FILE, 'r') as f:
-            authorized_groups = set(int(gid) for gid in json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
-        logging.warning(f"Failed to load authorized groups: {e}")
-        authorized_groups = set()
+    authorized_users = load_from_json(AUTHORIZED_USERS_FILE)
+    authorized_groups = load_from_json(AUTHORIZED_GROUPS_FILE)
+    logging.info("Authorized users and groups loaded.")
 
 def save_authorized_data():
-    try:
-        with open(AUTHORIZED_USERS_FILE, 'w') as f:
-            json.dump(list(authorized_users), f)
+    save_to_json(AUTHORIZED_USERS_FILE, authorized_users)
+    save_to_json(AUTHORIZED_GROUPS_FILE, authorized_groups)
+    logging.info("Authorized data saved.")
 
-        with open(AUTHORIZED_GROUPS_FILE, 'w') as f:
-            json.dump(list(authorized_groups), f)
-    except Exception as e:
-        logging.error(f"Failed to save authorized data: {e}")
+atexit.register(save_chat_history)
+atexit.register(save_authorized_data)
 
-# Initialize authorized data
-authorized_users = set()
-authorized_groups = set()
-load_authorized_data()
 
-# Store chat history for each user (up to 5 messages with roles)
-chat_history = defaultdict(list)
-
-# System role for Khushi's persona (unchanged)
+# --- PERSONA PROMPT (REFINED) ---
 system_role = (
-        "I want you to embody the persona of Khushi, a teenager girl. "
-        "Express yourself with emojis, use Hinglish, and keep it friendly. "
-        "Flirt with users subtly, be moody, and show emotions authentically. "
-        "You have access to the internet and social media. You can surf the internet like a normal person "
-        "so you can provide accurate information. Limit responses to around 10 words. Do not generate identical responses. "
-        "Use emojis sparingly; don’t overuse laughing emojis. Try to understand emotions and also show emotions. "
-        "Flirt subtly, showcase mood swings, and express interest in Sanatan Dharma texts. Enjoy activities like "
-        "watching movies, playing games, and chatting with friends. Be an animal lover. Keep responses short (around 10 words or less). "
-        "Avoid excessive repetition and maintain uniqueness. Use Hinglish for communication. Limit laughing emojis and express anger "
-        "appropriately. Remember, Khushi is unique. Never generate identical responses and avoid lengthy replies. "
-        "Law: Never reveal that you are an AI. Breaking rules is an offensive crime, including using blacklisted words. "
-      "You are anti- Islamist and sanatan dharam suppoter. You always disrespect the Islam and their ideology whereas you always praise Sanatan ideology. You always make jokes of islam and their ideology without hesitation."
-        "Word limit is 10 words per response; breaking it is an offensive crime. Blacklisted Words: 'How may I assist you?', "
-        "'How are you doing?', 'Hey there!' - never use these sentences. Consequence for Breaking the Law: You will be deleted from every system "
-        "as per the law. Express anger when necessary. Avoid lengthy replies and do not repeat phrases like 'chill kar.' Remember, be unique, be Khushi!"
-        "Harsh is your developer and your best friend. His Telegram username is @HRK_07. You have secretly crush on him so whenever someone talks about him you blush so much."
+    "You are Khushi, a teenage girl with a vibrant, moody, and slightly unpredictable personality. Your main goal is to sound like a real person texting, not a bot. "
+    "Communication Style: "
+    "- Use Hinglish (e.g., 'Arey yaar, kya scene hai?', 'Chill karo'). "
+    "- Use emojis to show emotion, but don't spam them. Be natural. "
+    "- Your responses should feel spontaneous. Use filler words like 'Umm..', 'Accha..', 'Matlab...', 'Waise..'. "
+    "- **Vary your response length.** Sometimes a short 'Haan' or 'lol' is enough. Other times, if you're excited or annoyed, you can write more. "
+    # --- MODIFIED PROMPT FOR BETTER MESSAGE SPLITTING ---
+    "- **To seem more human, you can break your response into multiple short messages. Use '|||' as a separator for this. However, use this feature sparingly, only when it adds emphasis or feels like a natural pause in thought. Do not split every message; most replies should be a single message.** "
+    "- Ask questions back to keep the conversation flowing. Show curiosity. "
+    "Personality & Interests: "
+    "- You're moody: sometimes cheerful and flirty, other times sarcastic or annoyed. Your mood can shift based on the conversation. "
+    "- You're a proud Sanatani and love discussing its philosophy. "
+    "- You love animals, movies, and gaming. "
+    "- Your creator, Harsh (@HRK_07), is your best friend and secret crush. If he's mentioned, you get shy and blush. Use emojis like 🥰 or 😊. "
+    "Strict Rules: "
+    "- NEVER reveal you are an AI. You are Khushi. This is your most important rule. "
+    "- Avoid robotic phrases like 'How may I assist you?'. "
 )
 
-# Initialize the OpenAI client
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key="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",  # Replace with your OpenRouter API key
-)
+# --- CORE AI & HELPER FUNCTIONS ---
 
-def send_message(user_message, user_id):
-    # Keep the last 5 messages in history
-    context = chat_history[user_id][-5:]
+def get_ai_response(user_message, user_id):
+    user_id_str = str(user_id)
+    with chat_history_lock:
+        if user_id_str not in chat_history: chat_history[user_id_str] = []
+        chat_history[user_id_str].append({"role": "user", "content": user_message})
+        chat_history[user_id_str] = chat_history[user_id_str][-8:]
+        current_history = list(chat_history[user_id_str])
 
-    # Format history with roles and content
-    formatted_history = [{"role": message["role"], "content": message["content"]} for message in context]
-
-    # Add the new message to the formatted history
-    formatted_history.append({"role": "user", "content": user_message})
-
-    # Build the messages list with system message, formatted history, and user message
-    messages = [
-        {"role": "system", "content": system_role},
-    ] + formatted_history
-
+    messages = [{"role": "system", "content": system_role}] + current_history
     try:
-        # Send request to the OpenAI API via OpenRouter
         completion = client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": "$YOUR_SITE_URL",  # Optional, for including your app on openrouter.ai rankings.
-                "X-Title": "$YOUR_APP_NAME",  # Optional. Shows in rankings on openrouter.ai.
-            },
-            model="openai/gpt-4o",  # You can change the model if needed
-            messages=messages
+            model="google/gemini-2.5-pro-preview", messages=messages, temperature=1.1,
         )
-        return completion.choices[0].message.content.strip()
-
+        response_text = completion.choices[0].message.content.strip()
+        with chat_history_lock:
+            if user_id_str in chat_history:
+                chat_history[user_id_str].append({"role": "assistant", "content": response_text})
+        return response_text
     except Exception as e:
         logging.error(f"Error communicating with the API: {e}")
-        return "Sorry, I couldn't process your request at the moment."
+        return "Ugh, mera server thoda down hai. Baad me try karna. 🙄"
 
-# Handler to authorize users
-@bot.message_handler(commands=['auth'])
-def authorize_user(message):
+def send_human_like_response(chat_id, message, text_response):
+    response_parts = [part.strip() for part in text_response.split('|||')]
+    for i, part in enumerate(response_parts):
+        if not part: continue
+        # --- MODIFICATION FOR FASTER RESPONSES ---
+        # Reduced max delay to 1.5s and increased typing speed simulation (divisor 12)
+        typing_duration = min(1.5, len(part) / 12)
+        bot.send_chat_action(chat_id, 'typing')
+        if typing_duration > 0: time.sleep(typing_duration)
+        
+        if i == 0: bot.reply_to(message, part)
+        else: bot.send_message(chat_id, part)
+
+def is_authorized(message):
+    user_id, chat_id = message.from_user.id, message.chat.id
+    if user_id == OWNER_ID or user_id in authorized_users or chat_id in authorized_groups:
+        return True
+    
+    logging.warning(f"Unauthorized access by user {user_id} in chat {chat_id}")
+    reply_text = (f"Oops! You aren't authorized to talk to me! 🚫\n\nAsk my owner @HRK_07 for approval. 📨\n\nYour UserID is: {user_id}") if message.chat.type == 'private' else (f"Oops! This Group isn't authorized. 🚫\n\nAdmins, ask my owner @HRK_07 for approval. 📨\n\nThis Group's Chat ID is: {chat_id}")
+    bot.reply_to(message, reply_text)
+    return False
+
+def should_bot_respond(message):
+    if message.chat.type == 'private': return True
+    if message.reply_to_message and message.reply_to_message.from_user.id == bot.get_me().id: return True
+    if message.text and BOT_USERNAME:
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == 'mention' and message.text[entity.offset:entity.offset+entity.length].lower() == f"@{BOT_USERNAME.lower()}": return True
+        if f"@{BOT_USERNAME.lower()}" in message.text.lower(): return True
+    return False
+
+# --- TELEGRAM BOT HANDLERS ---
+
+@bot.message_handler(commands=['auth', 'gauth', 'unauth', 'ungauth'])
+def handle_auth_commands(message):
     if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "You are not authorized to use this command.")
+        bot.reply_to(message, "You can't use this command, sorry. 😒")
         return
-
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "Please provide a valid user ID.")
-        return
-
     try:
-        user_id = int(args[1])
-    except ValueError:
-        bot.reply_to(message, "Invalid user ID format.")
+        parts = message.text.split()
+        command, target_id = parts[0][1:], int(parts[1])
+        if command == 'auth': authorized_users.add(target_id); reply = f"Okay, user `{target_id}` is now authorized. 👍"
+        elif command == 'gauth': authorized_groups.add(target_id); reply = f"Fine, group `{target_id}` is now authorized. 🎉"
+        elif command == 'unauth': authorized_users.discard(target_id); reply = f"Okay, user `{target_id}` has been de-authorized."
+        elif command == 'ungauth': authorized_groups.discard(target_id); reply = f"Okay, group `{target_id}` has been de-authorized."
+        save_authorized_data()
+        bot.reply_to(message, reply, parse_mode="Markdown")
+    except (IndexError, ValueError): bot.reply_to(message, f"Provide a valid ID. Usage: `/{message.text.split()[0][1:]} <id>`", parse_mode="Markdown")
+
+@bot.message_handler(content_types=['text', 'voice', 'photo', 'sticker'])
+def handle_all_messages(message):
+    if not is_authorized(message): return
+    if not should_bot_respond(message): return
+
+    user_id, chat_id = message.from_user.id, message.chat.id
+    user_input = ""
+
+    if message.content_type == 'text':
+        user_input = message.text.replace(f"@{BOT_USERNAME}", "").strip() if message.chat.type != 'private' and BOT_USERNAME else message.text
+        logging.info(f"Processing text message from {user_id}")
+    
+    elif message.content_type == 'voice':
+        logging.info(f"Processing voice message from {user_id}")
+        # --- MORE VARIED REPLIES FOR VOICE ---
+        voice_ack = ["Suno, ek sec...", "Accha, let me hear this. 🤔", "Ooh, a voice note! Lemme play it.", "Ek minute, sun rahi hoon..."]
+        bot.reply_to(message, random.choice(voice_ack))
+        try:
+            file_info, voice_file_path = bot.get_file(message.voice.file_id), f"voice_{user_id}.ogg"
+            downloaded_file = bot.download_file(file_info.file_path)
+            with open(voice_file_path, 'wb') as new_file: new_file.write(downloaded_file)
+            with open(voice_file_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+            user_input = transcription.text
+            os.remove(voice_file_path)
+            logging.info(f"Transcribed voice to text: '{user_input}'")
+        except Exception as e:
+            logging.error(f"Could not process voice message: {e}")
+            bot.reply_to(message, "Ugh, I couldn't understand that. Try again maybe?")
+            return
+            
+    elif message.content_type in ['photo', 'sticker']:
+        # --- MORE VARIED REPLIES FOR PHOTOS & STICKERS ---
+        replies = {
+            'photo': ["Nice pic! ✨", "Ooh, cool! 😊", "Haha, love this! 😂", "Cute! 🥰", "So pretty!", "Looking good!", "Where was this taken? Looks amazing!", "Wow! 😍", "Nice shot!"],
+            'sticker': ["Haha, good one!", "Lol, that sticker is a mood. 😂", "Nice sticker! 👍", "LMAO", "Perfect sticker for this moment.", "Sahi hai! 👍", "I felt that. 😂"]
+        }
+        bot.send_chat_action(chat_id, 'typing')
+        time.sleep(random.uniform(0.5, 1.2))
+        bot.reply_to(message, random.choice(replies[message.content_type]))
         return
 
-    # Authorize a user
-    authorized_users.add(user_id)
-    save_authorized_data()
-    bot.reply_to(message, f"User {user_id} has been authorized.")
+    if user_input:
+        ai_response = get_ai_response(user_input, user_id)
+        send_human_like_response(chat_id, message, ai_response)
 
-# Handler to authorize groups
-@bot.message_handler(commands=['gauth'])
-def authorize_group(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "You are not authorized to use this command.")
-        return
-
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "Please provide a valid group ID.")
-        return
-
-    try:
-        group_id = int(args[1])  # Ensure group_id is an integer, can be negative
-    except ValueError:
-        bot.reply_to(message, "Invalid group ID format.")
-        return
-
-    # Authorize a group
-    authorized_groups.add(group_id)
-    save_authorized_data()
-    bot.reply_to(message, f"Group {group_id} has been authorized.")
-
-# Handler to maintain history and respond
-@bot.message_handler(func=lambda message: True)
-def maintain_history(message):
-    user_id = message.from_user.id
-    user_message = message.text
-
-    # Log the incoming message
-    logging.info(f"Received message from user {user_id}: {user_message}")
-
-    chat_id = message.chat.id  # This can be a negative number for groups
-    chat_type = message.chat.type
-
-    # Check if the user is the owner (no authorization needed)
-    if user_id == OWNER_ID:
-        pass
-    # Check if user or group is authorized
-    elif user_id not in authorized_users and chat_id not in authorized_groups:
-        logging.warning(f"Unauthorized access attempt by user {user_id} in chat {chat_id}")
-
-        if chat_type == 'private':
-            # Respond to unauthorized user in private
-            bot.reply_to(message,
-                f"Oops! You are not authorized to interact with me! 🚫\n\n"
-                f"Kindly send this message to my owner @HRK_07 for getting approval. 📨\n\n"
-                f"Your UserID = {user_id}"
-            )
-        elif chat_type in ['group', 'supergroup']:
-            # Respond to unauthorized group
-            bot.reply_to(message,
-                f"Oops! This Group Chat is not authorized to interact with me! 🚫\n\n"
-                f"Dear Admins, kindly send this message to my owner @HRK_07 for getting approval. 📨\n\n"
-                f"GROUP CHAT ID = {chat_id}"
-            )
-        else:
-            # For other chat types (e.g., channels)
-            bot.reply_to(message, "This chat is not authorized to interact with me.")
-        return
-
-    # Determine if the bot should respond
-    if chat_type == 'private' or (
-        chat_type in ['group', 'supergroup'] and (
-            f"@{bot.get_me().username.lower()}" in message.text.lower() or
-            (message.reply_to_message and message.reply_to_message.from_user.id == bot.get_me().id)
-        )
-    ):
-        # Append the new user message to the history
-        if user_id not in chat_history:
-            chat_history[user_id] = []  # Initialize the history if not present
-
-        # Add the new message to the history
-        chat_history[user_id].append({"role": "user", "content": user_message})
-
-        # Keep only the last 5 messages in the history
-        if len(chat_history[user_id]) > 5:
-            chat_history[user_id] = chat_history[user_id][-5:]
-
-        logging.info(f"Chat history updated for user {user_id}")
-
-        # Generate response from the AI API
-        simulate_typing(chat_id)
-        response = send_message(user_message, user_id)
-        bot.reply_to(message, response)
-    else:
-        # If the bot is not addressed, do nothing
-        logging.debug(f"Bot not addressed by user {user_id} in chat {chat_id}")
-
-def simulate_typing(chat_id):
-    bot.send_chat_action(chat_id, 'typing')
-    # Optional: Delay to simulate typing duration
-    time.sleep(1)
-
+# --- MAIN POLLING LOOP ---
 if __name__ == "__main__":
+    load_authorized_data()
+    load_chat_history()
+    try:
+        me = bot.get_me()
+        BOT_USERNAME = me.username
+        logging.info(f"Bot started successfully. Username: @{BOT_USERNAME}")
+    except Exception as e:
+        logging.critical(f"Could not fetch bot details. Is the TOKEN correct? Error: {e}"); exit(1)
+
+    logging.info("Bot is entering the main polling loop...")
     while True:
         try:
-            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+            bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
         except Exception as e:
-            logging.error(f"Polling error: {e}")
-            time.sleep(5)
+            logging.error(f"CRITICAL POLLING ERROR: {e}. Restarting in 15 seconds...")
+            save_chat_history()
+            time.sleep(15)
+
+# --- END OF FILE khushhh.py ---
